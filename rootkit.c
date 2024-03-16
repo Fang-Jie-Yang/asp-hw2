@@ -21,6 +21,9 @@ MODULE_VERSION("0.1");
 
 static int major;
 struct cdev *kernel_cdev;
+struct class *class;
+struct device *device;
+dev_t dev_id;
 
 static int rootkit_open(struct inode *inode, struct file *filp)
 {
@@ -37,8 +40,29 @@ static int rootkit_release(struct inode *inode, struct file *filp)
 static long rootkit_ioctl(struct file *filp, unsigned int ioctl,
 			  unsigned long arg)
 {
+	long ret = 0;
+
 	printk(KERN_INFO "%s\n", __func__);
-	return 0;
+
+	switch(ioctl) {
+
+	case IOCTL_MOD_HOOK:
+		//do something
+		break;
+	case IOCTL_MOD_HIDE:
+		//do something
+		break;
+	case IOCTL_MOD_MASQ:
+		//do something
+		break;
+	case IOCTL_FILE_HIDE:
+		//do something
+		break;
+
+	default:
+		ret = -EINVAL;
+	}
+	return ret;
 }
 
 struct file_operations fops = {
@@ -60,19 +84,43 @@ static int __init rootkit_init(void)
 	ret = alloc_chrdev_region(&dev_no, 0, 1, "rootkit");
 	if (ret < 0) {
 		pr_info("major number allocation failed\n");
-		return ret;
+		goto err;
 	}
 
 	major = MAJOR(dev_no);
 	dev = MKDEV(major, 0);
+	dev_id = dev;
 	printk("The major number for your device is %d\n", major);
 	ret = cdev_add(kernel_cdev, dev, 1);
 	if (ret < 0) {
 		pr_info(KERN_INFO "unable to allocate cdev");
-		return ret;
+		goto err_cdev;
 	}
 
+	// create /dev node automatically
+	class = class_create(THIS_MODULE, OURMODNAME);
+	if (IS_ERR(class)) {
+		pr_err("class_create() failed\n");
+		ret = PTR_ERR(class);
+		goto err_class;
+	}
+	device = device_create(class, NULL, dev, NULL, OURMODNAME);
+	if (IS_ERR(device)) {
+		pr_err("device_create() failed\n");
+		ret = PTR_ERR(device);
+		goto err_device;
+	}
 	return 0;
+
+err_device:
+	class_destroy(class);
+err_class:
+	cdev_del(kernel_cdev);
+err_cdev:
+	unregister_chrdev_region(dev, 1);
+err:
+	return ret;
+
 }
 
 static void __exit rootkit_exit(void)
@@ -81,7 +129,13 @@ static void __exit rootkit_exit(void)
 
 	pr_info("%s: removed\n", OURMODNAME);
 	cdev_del(kernel_cdev);
+	// XXX: this should be major or dev?
 	unregister_chrdev_region(major, 1);
+
+	device_destroy(class, dev_id);
+
+	class_destroy(class);
+
 }
 
 module_init(rootkit_init);
