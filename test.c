@@ -49,8 +49,8 @@ int main(int argc, char *argv[]) {
 
 		masq = (struct masq_proc *)malloc(sizeof(struct masq_proc) * n);
 		for (i = 0; i < n; i++) {
-			strncpy(masq[i].new_name, argv[2 + i], MASQ_LEN);
-			strncpy(masq[i].orig_name, argv[2 + i + 1], MASQ_LEN);
+			strncpy(masq[i].new_name, argv[2 + 2 * i], MASQ_LEN);
+			strncpy(masq[i].orig_name, argv[2 + 2 * i + 1], MASQ_LEN);
 		}
 
 		req.len = n;
